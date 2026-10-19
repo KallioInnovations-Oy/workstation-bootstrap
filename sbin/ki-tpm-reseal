@@ -1,0 +1,24 @@
+#!/bin/bash
+# KallioInnovations: bind disk unlock to Secure Boot state (TPM PCR 7) again
+# after ki-firmware-update. Runs at boot from ki-tpm-reseal.service while
+# /var/lib/ki/tpm-reseal-pending exists; can also be run by hand.
+set -Eeuo pipefail
+source /usr/local/lib/ki/ki.conf
+KI_LIB_SRC=/usr/local/lib/ki; KI_ESCROW_PUB=/usr/local/lib/ki/escrow.pub
+source /usr/local/lib/ki/common.sh
+
+ki_require_root
+FLAG="$KI_STATE_DIR/tpm-reseal-pending"
+[ -f "$FLAG" ] || [ "${1:-}" = "--force" ] || { echo "Nothing to do: no firmware update pending."; exit 0; }
+
+DEV=$(ki_luks_device)
+systemd-cryptenroll --unlock-tpm2-device=auto --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs=7 "$DEV"
+
+SLOTS=$(ki_luks_slots "$DEV")
+[ "$(grep -c '^tpm2 ' <<<"$SLOTS")" -eq 1 ] && ki_match '^tpm2 [0-9]+ 7$' "$SLOTS" \
+  || ki_die "Unexpected TPM slots after re-binding: $SLOTS"
+ki_tpm_unlocks "$DEV" || ki_die "Re-bound TPM slot does not unlock the disk."
+
+rm -f "$FLAG"
+logger -t ki-tpm-reseal "TPM disk unlock re-bound to PCR 7"
+ki_ok "TPM disk unlock re-bound to Secure Boot state (PCR 7)"

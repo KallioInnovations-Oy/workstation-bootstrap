@@ -1,0 +1,8 @@
+[Unit]
+Description=KallioInnovations: sync app list, hostnames and wallpaper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ki-sync

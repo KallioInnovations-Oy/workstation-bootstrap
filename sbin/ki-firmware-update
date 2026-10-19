@@ -1,0 +1,50 @@
+#!/bin/bash
+# KallioInnovations: install firmware updates (BIOS, Thunderbolt, SSD, ...)
+# without a disk recovery prompt afterwards.
+#
+# A BIOS or Secure Boot database update can change what the TPM measures, and
+# the TPM would then refuse to unlock the disk. So, like suspending BitLocker,
+# this binds the TPM to no measurements for one boot; ki-tpm-reseal.service
+# binds it to Secure Boot (PCR 7) again on the next boot.
+#
+# Usage: sudo ki-firmware-update
+set -Eeuo pipefail
+source /usr/local/lib/ki/ki.conf
+KI_LIB_SRC=/usr/local/lib/ki; KI_ESCROW_PUB=/usr/local/lib/ki/escrow.pub
+source /usr/local/lib/ki/common.sh
+
+ki_require_root
+DEV=$(ki_luks_device)
+
+AC=$(cat /sys/class/power_supply/AC*/online 2>/dev/null || echo 0)
+[ "$AC" = "1" ] || ki_die "Plug in the charger first; firmware updates need mains power."
+
+ki_step "Checking for firmware updates"
+fwupdmgr refresh --force >/dev/null 2>&1 || ki_warn "Could not refresh firmware metadata; using cached data."
+set +e
+LIST=$(fwupdmgr get-updates --no-unreported-check --no-metadata-check 2>&1)
+RC=$?
+set -e
+case "$RC" in
+  2) ki_ok "Firmware is up to date"; exit 0 ;;
+  0) printf '%s\n' "$LIST" ;;
+  *) ki_die "fwupdmgr could not list updates: $LIST" ;;
+esac
+
+ki_step "Suspending the TPM binding for one boot"
+systemd-cryptenroll --unlock-tpm2-device=auto --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs= "$DEV" >/dev/null 2>&1 \
+  || ki_die "Could not suspend the TPM binding; no firmware was changed."
+ki_match '^tpm2 [0-9]+ none$' "$(ki_luks_slots "$DEV")" \
+  || ki_die "TPM binding is not suspended; no firmware was changed."
+install -d -m 0755 "$KI_STATE_DIR"
+touch "$KI_STATE_DIR/tpm-reseal-pending"
+ki_ok "Suspended; re-bound automatically at the next boot"
+
+ki_step "Installing firmware"
+if fwupdmgr update -y --no-reboot-check --no-unreported-check --no-metadata-check; then
+  ki_ok "Firmware staged"
+else
+  ki_warn "fwupdmgr reported a problem; the TPM binding is still restored at the next boot."
+fi
+echo
+echo "Reboot to apply the firmware. The laptop may restart twice; it should not ask for a disk passphrase."

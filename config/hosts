@@ -1,0 +1,6 @@
+# Internal hostnames, written to /etc/hosts between KI markers.
+# Format: <Tailscale IP> <name> [<name> ...]   One entry per line.
+# Applied by bootstrap.sh and daily by ki-sync. Replaced later by Tailscale MagicDNS.
+100.103.6.86  staging.kallioinnovations.fi staging.kallioinnovations.com
+# KI App / KI Admin staging (ki-staging-01): add its Tailscale IP, e.g.
+# 100.x.y.z  app.staging.kallioinnovations.fi admin.staging.kallioinnovations.fi

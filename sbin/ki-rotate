@@ -1,0 +1,93 @@
+#!/bin/bash
+# KallioInnovations: replace this laptop's escrowed secrets (disk recovery key,
+# kiadmin password, GRUB password) and seal a new escrow file.
+#
+# Run it after any secret in the escrow file has been used or seen: a disk
+# recovery, IT using the kiadmin password, reissuing the laptop to another
+# person, or when someone with the escrow private key leaves.
+#
+#   sudo ki-rotate "reason"
+#
+# If the TPM no longer unlocks the disk (e.g. after a recovery), it asks for
+# the current recovery key and binds the TPM again as part of the rotation.
+set -Eeuo pipefail
+source /usr/local/lib/ki/ki.conf
+KI_LIB_SRC=/usr/local/lib/ki; KI_ESCROW_PUB=/usr/local/lib/ki/escrow.pub
+source /usr/local/lib/ki/common.sh
+
+ki_require_root
+REASON=${1:-}
+[ -n "$REASON" ] || ki_die 'Usage: sudo ki-rotate "reason, e.g. recovery after BIOS reset"'
+ki_check_escrow_pub
+[ -t 0 ] || ki_die "Run ki-rotate from a terminal; it needs a confirmation."
+
+SECRETS=$(mktemp -d /run/ki-rotate.XXXXXX); chmod 0700 "$SECRETS"
+trap 'find "$SECRETS" -type f -exec shred -u {} + 2>/dev/null; rm -rf "$SECRETS"' EXIT
+
+DEV=$(ki_luks_device)
+UUID=$(cryptsetup luksUUID "$DEV")
+BEFORE=$(ki_luks_slots "$DEV")
+OLD_SLOTS=$(awk '$1 == "other" {print $2}' <<<"$BEFORE")
+
+ki_step "Authorising"
+if ki_tpm_unlocks "$DEV"; then
+  UNLOCK=(--unlock-tpm2-device=auto)
+  ki_ok "Using the TPM"
+else
+  ki_warn "The TPM cannot unlock the disk. Enter the CURRENT recovery key from escrow."
+  read -r -s -p "Current recovery key: " OLDKEY < /dev/tty; echo
+  printf '%s' "$OLDKEY" > "$SECRETS/old.key"; unset OLDKEY
+  ki_keyfile_unlocks "$DEV" "$SECRETS/old.key" || ki_die "That recovery key does not unlock the disk."
+  UNLOCK=(--unlock-key-file="$SECRETS/old.key")
+  systemd-cryptenroll "${UNLOCK[@]}" --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs=7 "$DEV" >/dev/null
+  ki_tpm_unlocks "$DEV" || ki_die "TPM re-binding failed."
+  rm -f "$KI_STATE_DIR/tpm-reseal-pending"
+  ki_ok "TPM bound to Secure Boot state again (PCR 7)"
+fi
+
+ki_step "New recovery key"
+RECOVERY=$(ki_recovery_key)
+printf '%s' "$RECOVERY" > "$SECRETS/recovery.key"
+NEWPASSWORD="$RECOVERY" systemd-cryptenroll "${UNLOCK[@]}" --password "$DEV" >/dev/null
+AFTER=$(ki_luks_slots "$DEV")
+NEW_SLOT=$(comm -13 <(awk '$1 == "other" {print $2}' <<<"$BEFORE" | sort) <(awk '$1 == "other" {print $2}' <<<"$AFTER" | sort))
+[ "$(grep -c . <<<"$NEW_SLOT")" -eq 1 ] || ki_die "Could not identify the new recovery key slot."
+if ! ki_keyfile_unlocks "$DEV" "$SECRETS/recovery.key"; then
+  cryptsetup -q luksKillSlot "$DEV" "$NEW_SLOT"
+  ki_die "New recovery key did not verify; it was removed and nothing else changed."
+fi
+ki_ok "New recovery key in slot $NEW_SLOT, tested"
+
+ki_step "New kiadmin and GRUB passwords"
+ADMIN_PW=$(ki_password 24)
+GRUB_PW=$(ki_password 20)
+CRYPT_OPTS=$(awk -v uuid="$UUID" '$1 !~ /^#/ && index($0, uuid) {print $4}' /etc/crypttab)
+ki_apply_grub_lock "$(ki_grub_hash "$GRUB_PW")" "$UUID" "$CRYPT_OPTS"
+
+SERIAL=$(ki_serial)
+ESCROW_FILE="$KI_ESCROW_DIR/${SERIAL}-$(date +%Y%m%d-%H%M).age"
+printf 'host=%s\nserial=%s\ndevice=%s\nluks_uuid=%s\ncreated=%s\nreason=%s\nrecovery_key=%s\nkiadmin_password=%s\ngrub_user=%s\ngrub_password=%s\n' \
+  "$(hostnamectl --static)" "$SERIAL" "$DEV" "$UUID" "$(date -Iseconds)" "$REASON" \
+  "$RECOVERY" "$ADMIN_PW" "$KI_ADMIN_USER" "$GRUB_PW" | ki_seal "$ESCROW_FILE"
+
+cat << MSG
+
+  New sealed escrow file: $ESCROW_FILE
+  Store it in device-escrow as ${SERIAL}/$(basename "$ESCROW_FILE")
+  The old recovery key and kiadmin password keep working until you type SAVED.
+
+$(cat "$ESCROW_FILE")
+
+MSG
+while :; do
+  read -r -p "Type SAVED when the file is in device-escrow: " ANSWER < /dev/tty || ki_die "No terminal."
+  [ "$ANSWER" = "SAVED" ] && break
+done
+
+printf '%s:%s\n' "$KI_ADMIN_USER" "$ADMIN_PW" | chpasswd
+for slot in $OLD_SLOTS; do
+  cryptsetup luksKillSlot --key-file "$SECRETS/recovery.key" "$DEV" "$slot"
+done
+unset RECOVERY ADMIN_PW GRUB_PW
+ki_ok "Old recovery key and kiadmin password retired"
+/usr/local/sbin/ki-check || true

@@ -1,0 +1,5 @@
+# Snaps installed on every workstation, one per line, optionally followed by --classic.
+# Applied by bootstrap.sh and daily by ki-sync. Removing a line does not uninstall.
+# Firefox is already part of Ubuntu.
+# code --classic
+# postman

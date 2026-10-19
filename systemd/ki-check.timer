@@ -1,0 +1,10 @@
+[Unit]
+Description=KallioInnovations: compliance check at boot and daily
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1d
+Persistent=true
+
+[Install]
+WantedBy=timers.target

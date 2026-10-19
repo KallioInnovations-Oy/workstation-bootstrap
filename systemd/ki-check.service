@@ -1,0 +1,9 @@
+[Unit]
+Description=KallioInnovations: workstation compliance check
+After=ki-tpm-reseal.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ki-check --report
+SuccessExitStatus=1

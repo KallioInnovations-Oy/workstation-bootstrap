@@ -1,0 +1,8 @@
+# Ubuntu packages installed on every workstation, one per line.
+# Applied by bootstrap.sh and daily by ki-sync. Removing a line does not uninstall.
+git
+curl
+htop
+vim
+fprintd
+libpam-fprintd

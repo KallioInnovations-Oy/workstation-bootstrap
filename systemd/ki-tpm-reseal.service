@@ -1,0 +1,11 @@
+[Unit]
+Description=KallioInnovations: re-bind TPM disk unlock after a firmware update
+ConditionPathExists=/var/lib/ki/tpm-reseal-pending
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ki-tpm-reseal
+
+[Install]
+WantedBy=multi-user.target

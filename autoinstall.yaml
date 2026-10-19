@@ -1,0 +1,48 @@
+# KallioInnovations workstation - automated Ubuntu Desktop 26.04 install
+#
+# Use: boot the Ubuntu 26.04.1 Desktop USB, choose "Automated installation"
+# and give the URL of this file:
+#   https://raw.githubusercontent.com/KallioInnovations-Oy/workstation-bootstrap/main/autoinstall.yaml
+#
+# WARNING: this wipes the largest disk in the machine without asking.
+#
+# The disk passphrase and kiadmin password below are public on purpose.
+# They only exist until bootstrap.sh runs on first boot, which replaces both.
+#   Disk passphrase:  ki-install-temporary
+#   kiadmin password: ki-install-temporary
+autoinstall:
+  version: 1
+
+  locale: en_US.UTF-8
+  keyboard:
+    layout: fi
+  timezone: Europe/Helsinki
+
+  identity:
+    realname: KI Admin
+    username: kiadmin
+    hostname: ki-ws-new          # bootstrap.sh renames it from the serial number
+    password: '$6$kiinstalltemp01$52fkQNEL60QCRUb6tCsuFRXC.kbbi3lDTtoTmoaNKGF.7fwDrYYIHIKpGyD7KVuraHjAgdJf6L1T5siDckGUA1'
+
+  # LVM inside LUKS2, whole disk. bootstrap.sh moves unlocking to the TPM.
+  storage:
+    layout:
+      name: lvm
+      sizing-policy: all
+      password: ki-install-temporary
+      match:
+        size: largest
+
+  ssh:
+    install-server: false
+  drivers:
+    install: false
+  codecs:
+    install: false
+
+  # Only what the first-boot bootstrap needs; bootstrap.sh installs the rest.
+  packages:
+    - git
+    - curl
+
+  shutdown: reboot

@@ -1,0 +1,135 @@
+#!/bin/bash
+# KallioInnovations: workstation compliance check. One PASS/WARN/FAIL line per
+# control; exits 1 if anything FAILs.
+#
+#   sudo ki-check              run interactively
+#   ki-check --report          (systemd, daily) write /var/log/ki-check.txt
+#   ki-check --pre-reboot      used by bootstrap.sh before the first reboot
+#
+# Anyone can read the latest result:  cat /var/log/ki-check.txt
+set -Euo pipefail
+source /usr/local/lib/ki/ki.conf
+KI_LIB_SRC=/usr/local/lib/ki; KI_ESCROW_PUB=/usr/local/lib/ki/escrow.pub
+source /usr/local/lib/ki/common.sh
+
+ki_require_root
+MODE=${1:-}
+FAILS=0; WARNS=0; OUT=""
+pass() { OUT+="PASS  $*"$'\n'; }
+warn() { OUT+="WARN  $*"$'\n'; WARNS=$((WARNS + 1)); }
+fail() { OUT+="FAIL  $*"$'\n'; FAILS=$((FAILS + 1)); }
+
+# --- identity ---
+HOST=$(hostnamectl --static 2>/dev/null || hostname)
+[ "$HOST" = "$(ki_expected_hostname)" ] && pass "Hostname $HOST matches serial" || fail "Hostname $HOST, expected $(ki_expected_hostname)"
+
+. /etc/os-release
+[ "${VERSION_ID:-}" = "$KI_OS_VERSION" ] && pass "Ubuntu $VERSION_ID" || fail "Ubuntu ${VERSION_ID:-?}, standard is $KI_OS_VERSION"
+
+# --- boot and disk ---
+SB=$(mokutil --sb-state 2>&1 || true)
+ki_match 'SecureBoot enabled' "$SB" && pass "Secure Boot enabled" || fail "Secure Boot is off"
+
+DEVS=$(blkid -t TYPE=crypto_LUKS -o device 2>/dev/null || true)
+if [ "$(grep -c . <<<"$DEVS")" -ne 1 ]; then
+  fail "Expected one encrypted partition, found: ${DEVS:-none}"
+else
+  DEV=$DEVS
+  SLOTS=$(ki_luks_slots "$DEV" 2>/dev/null || true)
+  TPM_COUNT=$(grep -c '^tpm2 ' <<<"$SLOTS" || true)
+  OTHER_COUNT=$(grep -c '^other ' <<<"$SLOTS" || true)
+  pass "Disk encrypted: $DEV"
+
+  if [ "$TPM_COUNT" -eq 1 ] && ki_match '^tpm2 [0-9]+ 7$' "$SLOTS"; then
+    pass "TPM unlock bound to Secure Boot state (PCR 7)"
+  elif [ "$TPM_COUNT" -eq 1 ] && ki_match '^tpm2 [0-9]+ none$' "$SLOTS" && [ -f "$KI_STATE_DIR/tpm-reseal-pending" ]; then
+    warn "TPM binding suspended for a firmware update; re-binds at next boot"
+  else
+    fail "TPM unlock slots wrong: $(tr '\n' ';' <<<"$SLOTS")"
+  fi
+  ki_tpm_unlocks "$DEV" && pass "TPM can unlock the disk now" || fail "TPM cannot unlock the disk (next boot will ask for the recovery key)"
+
+  [ "$OTHER_COUNT" -eq 1 ] && pass "Exactly one recovery key slot" || fail "$OTHER_COUNT typed-secret slots (expected 1: the recovery key)"
+
+  TMPKEY=$(mktemp); printf '%s' "$KI_INSTALL_LUKS_PASSPHRASE" > "$TMPKEY"
+  if ki_keyfile_unlocks "$DEV" "$TMPKEY"; then fail "Install disk passphrase still works"; else pass "Install disk passphrase removed"; fi
+  shred -u "$TMPKEY"
+
+  ALL_OK=1
+  for img in /boot/initrd.img-*; do ki_initramfs_has_tpm "$img" || { ALL_OK=0; fail "$(basename "$img") has no TPM unlock support"; }; done
+  [ "$ALL_OK" -eq 1 ] && pass "All initramfs images support TPM unlock"
+fi
+
+CFG=$(cat /boot/grub/grub.cfg 2>/dev/null || true)
+if ki_match "password_pbkdf2 ${KI_ADMIN_USER} " "$CFG" && ki_match '--unrestricted' "$CFG"; then
+  pass "Boot menu editing is password protected"
+else
+  fail "Boot menu is not locked"
+fi
+ki_match 'recovery mode|gnulinux-[^ ]*-recovery-' "$CFG" && fail "Recovery boot entries present (root shell)" || pass "No recovery boot entries"
+
+if [ "$MODE" != "--pre-reboot" ]; then
+  JOURNAL=$(journalctl -b -o cat -t systemd-cryptsetup 2>/dev/null || true)
+  if ki_match '[Tt][Pp][Mm]2? token unlocks volume|unlocked .*TPM2' "$JOURNAL"; then
+    pass "Disk was unlocked by the TPM at this boot"
+  else
+    warn "Could not confirm TPM unlock at this boot (was a passphrase asked?)"
+  fi
+fi
+
+# --- accounts ---
+SHADOW=$(getent shadow "$KI_ADMIN_USER" | cut -d: -f2)
+[ "$SHADOW" != "$KI_INSTALL_ADMIN_HASH" ] && pass "$KI_ADMIN_USER install password replaced" || fail "$KI_ADMIN_USER still has the install password"
+
+ADMINS=$(getent group sudo admin | cut -d: -f4 | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+[ "$ADMINS" = "$KI_ADMIN_USER " ] && pass "Only $KI_ADMIN_USER has admin rights" || fail "Admin rights held by: ${ADMINS:-nobody}"
+
+ESCROWS=$(find "$KI_ESCROW_DIR" -name '*.age' 2>/dev/null | wc -l)
+[ "$ESCROWS" -ge 1 ] && pass "Sealed escrow file present ($ESCROWS)" || fail "No sealed escrow file in $KI_ESCROW_DIR"
+
+# --- hardening ---
+UFW=$(ufw status verbose 2>/dev/null || true)
+ki_match 'Status: active' "$UFW" && ki_match 'deny \(incoming\)' "$UFW" && pass "Firewall active, deny incoming" || fail "Firewall not active / not denying incoming"
+
+[ "$(aa-enabled 2>/dev/null || true)" = "Yes" ] && pass "AppArmor enabled" || fail "AppArmor not enabled"
+
+RULES=$(auditctl -l 2>/dev/null || true)
+systemctl is-active -q auditd && ki_match 'key=identity' "$RULES" && pass "Audit logging active" || fail "Audit logging not active"
+
+systemctl is-enabled -q unattended-upgrades 2>/dev/null && pass "Automatic security updates enabled" || fail "Automatic security updates disabled"
+
+PAM=$(cat /etc/pam.d/common-auth 2>/dev/null || true)
+ki_match 'pam_faillock\.so preauth' "$PAM" && ki_match 'pam_faillock\.so authfail' "$PAM" && pass "Failed-login lockout" || fail "Failed-login lockout missing"
+
+LOCKS=$(cat /etc/dconf/db/local.d/locks/00-ki-security 2>/dev/null || true)
+ki_match 'idle-delay' "$LOCKS" && ki_match 'lock-enabled' "$LOCKS" && pass "Screen lock enforced (5 min)" || fail "Screen lock not enforced"
+
+# --- connectivity and maintenance ---
+if command -v tailscale >/dev/null; then
+  TS=$(tailscale status --json 2>/dev/null | python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("BackendState",""))' 2>/dev/null || true)
+  [ "$TS" = "Running" ] && pass "Tailscale connected" || warn "Tailscale not signed in (${TS:-unknown}); the user runs: tailscale up"
+else
+  fail "Tailscale not installed"
+fi
+
+systemctl is-enabled -q ki-sync.timer 2>/dev/null && pass "Daily app/config sync enabled" || warn "ki-sync.timer not enabled"
+
+FW=$(fwupdmgr get-updates --no-unreported-check --no-metadata-check 2>&1); FWRC=$?
+case "$FWRC" in
+  2) pass "Firmware up to date" ;;
+  0) warn "Firmware updates available: run sudo ki-firmware-update" ;;
+  *) warn "Could not check firmware updates" ;;
+esac
+
+SUMMARY="$HOST  $(date '+%Y-%m-%d %H:%M')  ${FAILS} fail, ${WARNS} warn"
+if [ "$MODE" = "--report" ]; then
+  { echo "$SUMMARY"; echo; printf '%s' "$OUT"; } > /var/log/ki-check.txt.new
+  chmod 0644 /var/log/ki-check.txt.new
+  mv /var/log/ki-check.txt.new /var/log/ki-check.txt
+  logger -t ki-check "$SUMMARY"
+else
+  echo
+  printf '%s' "$OUT" | sed -e $'s/^PASS/\033[32mPASS\033[0m/' -e $'s/^WARN/\033[33mWARN\033[0m/' -e $'s/^FAIL/\033[1;31mFAIL\033[0m/'
+  echo; echo "$SUMMARY"
+fi
+[ "$FAILS" -eq 0 ]

@@ -1,0 +1,29 @@
+#!/bin/bash
+# KallioInnovations: daily sync of managed data from the workstation-bootstrap
+# repo: app lists, internal hostnames and the wallpaper.
+#
+# Data only, by design: nothing from the repo is executed. Package and snap
+# names, hosts entries and image types are validated before use. Scripts and
+# the escrow key are updated only by IT (bootstrap or Phase 2 Ansible).
+set -Eeuo pipefail
+source /usr/local/lib/ki/ki.conf
+KI_LIB_SRC=/usr/local/lib/ki; KI_ESCROW_PUB=/usr/local/lib/ki/escrow.pub
+source /usr/local/lib/ki/common.sh
+
+ki_require_root
+export DEBIAN_FRONTEND=noninteractive
+
+if [ -d "$KI_SYNC_DIR/.git" ]; then
+  git -C "$KI_SYNC_DIR" fetch -q --depth 1 origin main
+  git -C "$KI_SYNC_DIR" reset -q --hard origin/main
+else
+  install -d -m 0755 "$(dirname "$KI_SYNC_DIR")"
+  git clone -q --depth 1 "$KI_REPO_URL" "$KI_SYNC_DIR"
+fi
+ki_ok "Repo at $(git -C "$KI_SYNC_DIR" rev-parse --short HEAD)"
+
+apt-get update -q >/dev/null 2>&1 || ki_warn "apt-get update failed"
+ki_apply_apps "$KI_SYNC_DIR/config"
+ki_apply_hosts "$KI_SYNC_DIR/config/hosts"
+ki_apply_branding "$KI_SYNC_DIR/branding"
+ki_ok "Apps, hosts and wallpaper in sync"
