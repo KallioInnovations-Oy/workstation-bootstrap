@@ -49,9 +49,11 @@ ki_tpm_unlocks() {
   cryptsetup open --test-passphrase --token-only --token-type systemd-tpm2 "$1" >/dev/null 2>&1
 }
 
-# Exit 0 if the key file unlocks the device.
+# Exit 0 if the key file itself unlocks the device. Token plugins are disabled:
+# otherwise cryptsetup tries the TPM token first and reports success whatever
+# the key file holds.
 ki_keyfile_unlocks() {
-  cryptsetup open --test-passphrase --key-file "$2" "$1" >/dev/null 2>&1
+  cryptsetup open --test-passphrase --disable-external-tokens --key-file "$2" "$1" >/dev/null 2>&1
 }
 
 # ---------- secrets ----------

@@ -276,7 +276,7 @@ else
   USER_PW=$(ki_random 'abcdefghjkmnpqrstuvwxyz23456789' 12)
   printf '%s:%s\n' "$USERNAME" "$USER_PW" | chpasswd
   chage -d 0 "$USERNAME"   # must choose a new password at first login
-  ki_ok "$USERNAME created (no admin rights)"
+  ki_ok "$USERNAME created (no admin rights). First-login password: $USER_PW"
 fi
 for grp in sudo adm; do
   if ki_match "^${grp}\$" "$(id -nG "$USERNAME" | tr ' ' '\n')"; then
@@ -359,7 +359,11 @@ done
 # Only now that the escrow file is stored: replace the install secrets.
 printf '%s:%s\n' "$KI_ADMIN_USER" "$ADMIN_PW" | chpasswd
 unset ADMIN_PW
-cryptsetup luksRemoveKey "$DEV" "$SECRETS/install.key"
+# Remove every slot holding the install passphrase (the installer may add more than one).
+for _ in 1 2 3 4 5 6 7 8; do
+  ki_keyfile_unlocks "$DEV" "$SECRETS/install.key" || break
+  cryptsetup luksRemoveKey --disable-external-tokens "$DEV" "$SECRETS/install.key"
+done
 if ki_keyfile_unlocks "$DEV" "$SECRETS/install.key"; then
   ki_die "The install passphrase still unlocks the disk."
 fi
