@@ -1,7 +1,8 @@
 # KallioInnovations workstation - automated Ubuntu Desktop 26.04 install
 #
-# Use: boot the Ubuntu 26.04.1 Desktop USB, choose "Automated installation"
-# and give the URL of this file:
+# Use: copy this file to the root of the Ubuntu 26.04.1 Desktop USB stick
+# (written with Rufus in ISO Image mode) and boot from it. Or, from a plain
+# stick, choose "Automated installation" and give the URL of this file:
 #   https://raw.githubusercontent.com/KallioInnovations-Oy/workstation-bootstrap/main/autoinstall.yaml
 #
 # WARNING: this wipes the largest disk in the machine without asking.
@@ -12,6 +13,20 @@
 #   kiadmin password: ki-install-temporary
 autoinstall:
   version: 1
+
+  # Always use the newest version of this file from GitHub when the machine is
+  # online. The installer re-reads /autoinstall.yaml after early-commands, so a
+  # stick with an older copy still installs the current configuration; offline,
+  # the copy on the stick is used as it is.
+  early-commands:
+    - >-
+      sh -c 'URL=https://raw.githubusercontent.com/KallioInnovations-Oy/workstation-bootstrap/main/autoinstall.yaml;
+      for i in 1 2 3 4 5 6; do
+      if command -v curl >/dev/null; then curl -fsSL --max-time 15 "$URL" -o /tmp/ki-autoinstall.yaml;
+      else wget -q -T 15 -O /tmp/ki-autoinstall.yaml "$URL"; fi
+      && grep -q "^autoinstall:" /tmp/ki-autoinstall.yaml
+      && cp /tmp/ki-autoinstall.yaml /autoinstall.yaml && exit 0;
+      sleep 5; done; exit 0'
 
   locale: en_US.UTF-8
   keyboard:
