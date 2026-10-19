@@ -45,4 +45,20 @@ autoinstall:
     - git
     - curl
 
+  # First-boot helper: after logging in as kiadmin, open a terminal (Ctrl+Alt+T)
+  # and type: ki-setup
+  late-commands:
+    - |
+      cat > /target/usr/local/bin/ki-setup << 'EOF'
+      #!/bin/bash
+      # KallioInnovations first-boot setup: fetches the bootstrap and runs it.
+      set -euo pipefail
+      REPO=https://github.com/KallioInnovations-Oy/workstation-bootstrap.git
+      DIR="$HOME/workstation-bootstrap"
+      read -r -p "Employee username (first name + last initial, e.g. villem): " U
+      if [ -d "$DIR/.git" ]; then git -C "$DIR" pull -q --ff-only; else git clone -q "$REPO" "$DIR"; fi
+      exec sudo bash "$DIR/bootstrap.sh" "$U"
+      EOF
+      chmod 0755 /target/usr/local/bin/ki-setup
+
   shutdown: reboot
