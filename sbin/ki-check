@@ -81,8 +81,25 @@ fi
 SHADOW=$(getent shadow "$KI_ADMIN_USER" | cut -d: -f2)
 [ "$SHADOW" != "$KI_INSTALL_ADMIN_HASH" ] && pass "$KI_ADMIN_USER install password replaced" || fail "$KI_ADMIN_USER still has the install password"
 
+PRIMARY=$(ki_primary_user_field user)
+ROLE=$(ki_primary_user_field role)
+ALLOWED="$KI_ADMIN_USER"
+[ -n "$PRIMARY" ] && [ "$ROLE" = developer ] && ALLOWED="$KI_ADMIN_USER"$'\n'"$PRIMARY"
+ALLOWED=$(sort -u <<<"$ALLOWED" | tr '\n' ' ')
 ADMINS=$(getent group sudo admin | cut -d: -f4 | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
-[ "$ADMINS" = "$KI_ADMIN_USER " ] && pass "Only $KI_ADMIN_USER has admin rights" || fail "Admin rights held by: ${ADMINS:-nobody}"
+if [ "$ADMINS" = "$ALLOWED" ]; then
+  pass "Admin rights: ${ADMINS% }"
+else
+  fail "Admin rights held by: ${ADMINS:-nobody }(expected: ${ALLOWED% })"
+fi
+
+if [ -z "$PRIMARY" ]; then
+  warn "No primary user recorded; run: sudo ki-user <username> [developer|standard]"
+elif ! id "$PRIMARY" >/dev/null 2>&1; then
+  fail "Primary user $PRIMARY does not exist"
+else
+  pass "Primary user $PRIMARY ($ROLE)"
+fi
 
 ESCROWS=$(find "$KI_ESCROW_DIR" -name '*.age' 2>/dev/null | wc -l)
 [ "$ESCROWS" -ge 1 ] && pass "Sealed escrow file present ($ESCROWS)" || fail "No sealed escrow file in $KI_ESCROW_DIR"
@@ -108,6 +125,11 @@ ki_match 'idle-delay' "$LOCKS" && ki_match 'lock-enabled' "$LOCKS" && pass "Scre
 if command -v tailscale >/dev/null; then
   TS=$(tailscale status --json 2>/dev/null | python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("BackendState",""))' 2>/dev/null || true)
   [ "$TS" = "Running" ] && pass "Tailscale connected" || warn "Tailscale not signed in (${TS:-unknown}); the user runs: tailscale up"
+  if [ -n "$PRIMARY" ]; then
+    OP=$(ki_tailscale_operator_now)
+    [ "$OP" = "$PRIMARY" ] && pass "$PRIMARY runs Tailscale without sudo" \
+      || fail "Tailscale operator is '${OP:-nobody}', not $PRIMARY; fix: sudo ki-user $PRIMARY $ROLE"
+  fi
 else
   fail "Tailscale not installed"
 fi

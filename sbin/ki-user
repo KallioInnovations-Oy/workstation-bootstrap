@@ -1,0 +1,35 @@
+#!/bin/bash
+# KallioInnovations: set this laptop's primary user and their role, and let
+# them run Tailscale without sudo. bootstrap.sh does the same at install time;
+# use this on laptops installed earlier, or when the role changes.
+#
+#   sudo ki-user <username> [developer|standard]
+#
+#   developer  (default) admin rights: sudo with their own password, asked at
+#              most once an hour
+#   standard   no admin rights
+set -Eeuo pipefail
+source /usr/local/lib/ki/ki.conf
+KI_LIB_SRC=/usr/local/lib/ki; KI_ESCROW_PUB=/usr/local/lib/ki/escrow.pub
+source /usr/local/lib/ki/common.sh
+
+ki_require_root
+USER_NAME=${1:-}
+ROLE=${2:-developer}
+[ -n "$USER_NAME" ] || ki_die "Usage: sudo ki-user <username> [developer|standard]"
+ki_valid_username "$USER_NAME" || ki_die "Username must be lowercase letters and digits, e.g. villem."
+
+ki_step "Primary user"
+ki_apply_user_role "$USER_NAME" "$ROLE"
+
+ki_step "Tailscale"
+if command -v tailscale >/dev/null; then
+  ki_tailscale_operator "$USER_NAME" \
+    && ki_ok "$USER_NAME runs tailscale up/down without sudo" \
+    || ki_warn "Could not set the Tailscale operator; is tailscaled running?"
+else
+  ki_warn "Tailscale is not installed"
+fi
+
+ki_ok "Group changes apply at $USER_NAME's next login"
+/usr/local/sbin/ki-check || true

@@ -60,19 +60,45 @@ autoinstall:
     - git
     - curl
 
-  # First-boot helper: after logging in as kiadmin, open a terminal (Ctrl+Alt+T)
-  # and type: ki-setup
+  # 1. Keep the Wi-Fi joined in the installer, so the first boot is already
+  #    online. (Skipped if the installer copied it itself, or none was used.)
+  # 2. First-boot helper: after logging in as kiadmin, open a terminal
+  #    (Ctrl+Alt+T) and type: ki-setup
   late-commands:
+    - |
+      for d in /etc/NetworkManager/system-connections /run/NetworkManager/system-connections; do
+        for f in "$d"/*.nmconnection; do
+          [ -f "$f" ] && grep -q '^type=wifi' "$f" || continue
+          dest="/target/etc/NetworkManager/system-connections/$(basename "$f")"
+          [ -e "$dest" ] && continue
+          mkdir -p /target/etc/NetworkManager/system-connections
+          sed '/^permissions=/d' "$f" > "$dest"
+          chown root:root "$dest"; chmod 0600 "$dest"
+        done
+      done
+      true
     - |
       cat > /target/usr/local/bin/ki-setup << 'EOF'
       #!/bin/bash
-      # KallioInnovations first-boot setup: fetches the bootstrap and runs it.
+      # KallioInnovations first-boot setup: waits for a network, fetches the
+      # bootstrap and runs it.
       set -euo pipefail
       REPO=https://github.com/KallioInnovations-Oy/workstation-bootstrap.git
       DIR="$HOME/workstation-bootstrap"
+      online() { curl -fsS --max-time 8 -o /dev/null https://github.com 2>/dev/null; }
+      if ! online; then
+        echo "No internet connection yet. Wi-Fi is fine; it does not need a cable."
+        until online; do
+          echo "Connect from the network menu at the top right, or press Enter here to pick a Wi-Fi network."
+          if read -r -t 20 _; then nmtui connect || true; fi
+        done
+      fi
+      echo "Online."
       read -r -p "Employee username (first name + last initial, e.g. villem): " U
+      read -r -p "Developer with admin rights (sudo)? [Y/n]: " A
+      case "$A" in [nN]*) ROLE=--standard ;; *) ROLE= ;; esac
       if [ -d "$DIR/.git" ]; then git -C "$DIR" pull -q --ff-only; else git clone -q "$REPO" "$DIR"; fi
-      exec sudo bash "$DIR/bootstrap.sh" "$U"
+      exec sudo bash "$DIR/bootstrap.sh" "$U" $ROLE
       EOF
       chmod 0755 /target/usr/local/bin/ki-setup
 

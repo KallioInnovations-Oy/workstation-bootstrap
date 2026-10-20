@@ -2,10 +2,15 @@
 # KallioInnovations workstation bootstrap - run once, on the first boot after
 # the automated install, logged in as kiadmin:
 #
+#   ki-setup        (installed by autoinstall.yaml: waits for Wi-Fi, fetches
+#                    this repo and runs this script)
+# or by hand:
 #   git clone https://github.com/KallioInnovations-Oy/workstation-bootstrap.git
-#   sudo bash workstation-bootstrap/bootstrap.sh <username>
+#   sudo bash workstation-bootstrap/bootstrap.sh <username> [--standard]
 #
 # <username> is the employee's account (first name + last initial, e.g. villem).
+# Developer by default: admin rights with their own password. --standard gives
+# an account without admin rights.
 #
 # Takes 20-40 minutes. It asks for input once, near the end: confirm that the
 # sealed escrow file has been stored. After that the disk unlocks with the TPM,
@@ -33,15 +38,25 @@ trap cleanup EXIT
 trap 'printf "\n\033[1;31mBOOTSTRAP FAILED\033[0m during: %s (line %s)\nNothing after this step ran. Fix the cause and run the script again.\n" "$STEP" "$LINENO" >&2' ERR
 
 USERNAME=${1:-}
+ROLE=developer
+case "${2:-}" in
+  "") ;;
+  --standard) ROLE=standard ;;
+  *) ki_die "Unknown option: $2   (usage: sudo bash bootstrap.sh <username> [--standard])" ;;
+esac
 LOG=/var/log/ki-bootstrap.log
 
 # =====================================================================
 ki_step "0/12 Preflight checks"
 # =====================================================================
 ki_require_root
-[ -n "$USERNAME" ] || ki_die "Usage: sudo bash bootstrap.sh <username>   (e.g. villem)"
-ki_match '^[a-z][a-z0-9]{1,30}$' "$USERNAME" || ki_die "Username must be lowercase letters and digits, e.g. villem."
+[ -n "$USERNAME" ] || ki_die "Usage: sudo bash bootstrap.sh <username> [--standard]   (e.g. villem)"
+ki_valid_username "$USERNAME" || ki_die "Username must be lowercase letters and digits, e.g. villem."
 [ "$USERNAME" != "$KI_ADMIN_USER" ] || ki_die "The employee account cannot be $KI_ADMIN_USER."
+ki_ok "Employee $USERNAME ($ROLE)"
+
+# Everything after this downloads: packages, Tailscale, firmware.
+ki_require_network
 
 # shellcheck source=/dev/null
 . /etc/os-release
@@ -201,12 +216,13 @@ AA=$(aa-enabled 2>&1 || true)
 [ "$AA" = "Yes" ] && ki_ok "AppArmor enabled" || ki_warn "AppArmor reports: $AA"
 
 # =====================================================================
-STEP="branding and hosts"; ki_step "4/12 Wallpaper and internal hostnames"
+STEP="branding, hosts and Wi-Fi"; ki_step "4/12 Wallpaper, internal hostnames, shared Wi-Fi"
 # =====================================================================
 ki_apply_branding "$REPO_DIR/branding"
 ki_ok "KallioInnovations wallpaper"
 ki_apply_hosts "$REPO_DIR/config/hosts"
 ki_ok "Staging hostnames in /etc/hosts"
+ki_share_wifi
 
 # =====================================================================
 STEP="TPM unlock"; ki_step "5/12 Disk unlock with the TPM"
@@ -276,14 +292,9 @@ else
   USER_PW=$(ki_random 'abcdefghjkmnpqrstuvwxyz23456789' 12)
   printf '%s:%s\n' "$USERNAME" "$USER_PW" | chpasswd
   chage -d 0 "$USERNAME"   # must choose a new password at first login
-  ki_ok "$USERNAME created (no admin rights). First-login password: $USER_PW"
+  ki_ok "$USERNAME created. First-login password: $USER_PW"
 fi
-for grp in sudo adm; do
-  if ki_match "^${grp}\$" "$(id -nG "$USERNAME" | tr ' ' '\n')"; then
-    gpasswd -d "$USERNAME" "$grp" >/dev/null
-    ki_warn "Removed $USERNAME from $grp"
-  fi
-done
+ki_apply_user_role "$USERNAME" "$ROLE"
 
 # =====================================================================
 STEP="Tailscale"; ki_step "9/12 Tailscale"
@@ -293,11 +304,10 @@ if ! command -v tailscale >/dev/null; then
   quiet sh "$SECRETS/tailscale-install.sh"
 fi
 systemctl enable --now tailscaled >/dev/null 2>&1
-if tailscale set --operator="$USERNAME" --hostname="$HOST" 2>/dev/null; then
-  ki_ok "Installed; $USERNAME signs in with: tailscale up"
-else
-  ki_warn "Could not pre-set the Tailscale operator. After handover IT runs: sudo tailscale up --operator=$USERNAME"
-fi
+ki_tailscale_operator "$USERNAME" \
+  || ki_die "Could not let $USERNAME run tailscale without sudo (tailscaled not answering?). Run the bootstrap again."
+tailscale set --hostname="$HOST" >/dev/null 2>&1 || ki_warn "Could not set the Tailscale hostname; it will use $HOST anyway."
+ki_ok "Installed; $USERNAME signs in with: tailscale up   (no sudo)"
 
 # =====================================================================
 STEP="KI tools"; ki_step "10/12 KI maintenance tools"
@@ -381,11 +391,12 @@ cat << EOF
   Next:
   1. Reboot. It must go straight to the login screen, with no
      disk passphrase prompt. (Firmware updates may add a reboot.)
-  2. The employee logs in as: $USERNAME
+  2. The employee logs in as: $USERNAME   ($ROLE)
 EOF
 [ -n "$USER_PW" ] && echo "     First-login password:   $USER_PW   (must be changed at login)"
+[ "$ROLE" = developer ] && echo "     Admin rights: sudo with their own password, asked at most once an hour."
 cat << EOF
-  3. The employee runs:  tailscale up   and signs in.
+  3. The employee runs:  tailscale up   (no sudo) and signs in.
   4. Settings > System > Users > Fingerprint Login.
   5. Check the result any time:  cat /var/log/ki-check.txt
 ================================================================

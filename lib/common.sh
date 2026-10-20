@@ -19,6 +19,123 @@ ki_match() { grep -Eq -- "$1" <<<"$2"; }
 
 ki_require_root() { [ "$(id -u)" -eq 0 ] || ki_die "Run this as root (sudo)."; }
 
+# ---------- network ----------
+# Exit 0 if GitHub answers over HTTPS (DNS, routing and TLS all working).
+ki_online() { curl -fsS --max-time 8 -o /dev/null https://github.com 2>/dev/null; }
+
+# Waits for an internet connection, helping the person at the keyboard join
+# Wi-Fi. Gives up after about 15 minutes. Interactive scripts only.
+ki_require_network() {
+  local tries=0
+  ki_online && { ki_ok "Internet connection"; return 0; }
+  ki_warn "No internet connection. Wi-Fi is fine; it does not need a cable."
+  until ki_online; do
+    tries=$((tries + 1))
+    [ "$tries" -le 45 ] || ki_die "Still no internet connection after 15 minutes."
+    if [ -r /dev/tty ] && command -v nmtui >/dev/null; then
+      printf '   Connect from the network menu at the top right of the screen, or press Enter here to pick a Wi-Fi network.\n'
+      if read -r -t 20 _ < /dev/tty; then
+        nmtui connect < /dev/tty > /dev/tty 2>&1 || true
+      fi
+    else
+      sleep 20
+    fi
+  done
+  ki_ok "Internet connection"
+}
+
+# Makes every saved Wi-Fi connection available to all users, so the network
+# kiadmin joined during setup also works at the employee's login screen.
+ki_share_wifi() {
+  local uuid type name flags
+  command -v nmcli >/dev/null || return 0
+  while IFS=: read -r uuid type; do
+    [ "$type" = "802-11-wireless" ] || continue
+    name=$(nmcli -g connection.id connection show "$uuid" 2>/dev/null || true)
+    nmcli connection modify "$uuid" connection.permissions "" >/dev/null 2>&1 \
+      || { ki_warn "Could not share Wi-Fi network: $name"; continue; }
+    flags=$(nmcli -g 802-11-wireless-security.psk-flags connection show "$uuid" 2>/dev/null || true)
+    case "$flags" in
+      ""|0*) ki_ok "Wi-Fi network shared with all users: $name" ;;
+      *) ki_warn "Wi-Fi $name: password saved for one user only; the employee types it once." ;;
+    esac
+  done < <(nmcli -g UUID,TYPE connection show 2>/dev/null || true)
+}
+
+# ---------- primary user ----------
+# Roles: developer = admin rights (sudo), asked for their password at most once
+# an hour; standard = no admin rights. Recorded in $KI_STATE_DIR/primary-user,
+# which ki-check reads.
+ki_valid_username() { ki_match '^[a-z][a-z0-9]{1,30}$' "$1"; }
+
+# ki_apply_user_role <user> <developer|standard>
+ki_apply_user_role() {
+  local user=$1 role=$2 grp drop tmp line ok=0
+  id "$user" >/dev/null 2>&1 || ki_die "No account named $user."
+  [ "$user" != "$KI_ADMIN_USER" ] || ki_die "The employee account cannot be $KI_ADMIN_USER."
+  drop="/etc/sudoers.d/60-ki-$user"
+  case "$role" in
+    developer)
+      usermod -aG sudo "$user"
+      # Ubuntu ships sudo-rs, which may reject options classic sudo accepts:
+      # use the first line that validates.
+      tmp=$(mktemp)
+      for line in \
+        "Defaults:$user timestamp_timeout=60, timestamp_type=global" \
+        "Defaults:$user timestamp_timeout=60"; do
+        printf '# KallioInnovations: developer %s, sudo password at most once an hour\n%s\n' "$user" "$line" > "$tmp"
+        if visudo -cqf "$tmp" >/dev/null 2>&1; then ok=1; break; fi
+      done
+      if [ "$ok" -eq 1 ]; then
+        install -m 0440 -o root -g root "$tmp" "$drop"
+      else
+        rm -f "$drop"
+        ki_warn "sudo password caching not changed (no option validated); sudo still works"
+      fi
+      rm -f "$tmp"
+      ki_ok "$user is a developer: admin rights via sudo with their own password"
+      ;;
+    standard)
+      for grp in sudo adm; do
+        if ki_match "^${grp}\$" "$(id -nG "$user" | tr ' ' '\n')"; then
+          gpasswd -d "$user" "$grp" >/dev/null
+          ki_warn "Removed $user from $grp"
+        fi
+      done
+      rm -f "$drop"
+      ki_ok "$user is a standard user: no admin rights"
+      ;;
+    *) ki_die "Role must be developer or standard, not: $role" ;;
+  esac
+  install -d -m 0755 "$KI_STATE_DIR"
+  printf 'user=%s\nrole=%s\n' "$user" "$role" > "$KI_STATE_DIR/primary-user"
+  chmod 0644 "$KI_STATE_DIR/primary-user"
+}
+
+# ki_primary_user_field <user|role> - prints the recorded value, or nothing.
+ki_primary_user_field() {
+  awk -F= -v k="$1" '$1 == k { print $2; exit }' "$KI_STATE_DIR/primary-user" 2>/dev/null || true
+}
+
+# ---------- Tailscale ----------
+# Prints the user allowed to run "tailscale up/down" without sudo, or nothing.
+ki_tailscale_operator_now() {
+  local prefs
+  prefs=$(tailscale debug prefs 2>/dev/null) || return 0
+  python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("OperatorUser") or "")' <<<"$prefs" 2>/dev/null || true
+}
+
+# ki_tailscale_operator <user> - waits for tailscaled (it is slow to start right
+# after install), sets the operator and verifies it. Exit 1 if it did not stick.
+ki_tailscale_operator() {
+  local user=$1
+  for _ in $(seq 1 30); do
+    [ -S /var/run/tailscale/tailscaled.sock ] && tailscale set --operator="$user" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  [ "$(ki_tailscale_operator_now)" = "$user" ]
+}
+
 # ---------- machine identity ----------
 ki_serial() {
   local s
