@@ -32,8 +32,8 @@ contains no secrets: the two install values in `autoinstall.yaml` and
 | 1. BIOS | 10 min | Supervisor password, Secure Boot on, Security Chip (TPM) on, Intel AMT off. **No power-on password.** See the procedure doc. |
 | 2. Install | 2 min | Boot the USB stick with `autoinstall.yaml` in its root (or a plain stick: choose **Automated installation** and give the URL below). Wipes the disk, no questions. Works offline: without a network the stick's copy is used and the first boot has no Wi-Fi yet, which `ki-setup` handles. If the installer was on Wi-Fi, that network is kept. |
 | 3. Bootstrap | 5 min | Log in as `kiadmin` (password `ki-install-temporary`), open a terminal (Ctrl+Alt+T) and type `ki-setup`. It waits for a network (Wi-Fi is fine; press Enter to pick one), asks the employee's username and whether they are a developer, then fetches and runs the bootstrap. |
-| 4. Escrow | 2 min | When asked, store the sealed file in `device-escrow`, type `SAVED`. |
-| 5. Handover | 5 min | Reboot (no disk passphrase prompt). The employee logs in, sets a password, runs `tailscale up` (no sudo needed), enrolls a fingerprint. |
+| 4. Escrow | 2 min | When asked, store the sealed file in `device-escrow`, type `SAVED`. Then the employee types their own password at the prompt; nobody else needs to see it. |
+| 5. Handover | 5 min | Reboot (no disk passphrase prompt). The employee logs in with their password (not the fingerprint, which does not unlock the login keyring), runs `tailscale up` (no sudo needed), enrolls a fingerprint. |
 
 Autoinstall URL:
 ```
@@ -62,7 +62,7 @@ again after fixing the cause. Its full log is `/var/log/ki-bootstrap.log`.
 6. TPM unlock bound to Secure Boot state (PCR 7); initramfs rebuilt and checked.
 7. Recovery key in LUKS slot 7, tested.
 8. Boot menu lock: entries boot without a password, editing them needs the GRUB password; recovery entries and the initramfs shell are disabled.
-9. Employee account, password must be changed at first login. **Developer** (default): admin rights through sudo with their own password, asked at most once an hour. **Standard** (`--standard`): no admin rights.
+9. Employee account, created without a password; the employee types their own at the end of the bootstrap. (A temporary password changed at first login would leave the GNOME login keyring locked with the old one.) **Developer** (default): admin rights through sudo with their own password, asked at most once an hour. **Standard** (`--standard`): no admin rights.
 10. Tailscale installed and the employee made its operator, so `tailscale up` works without sudo; they sign in so the device belongs to them.
 11. Installs the maintenance tools below and their timers.
 12. Firmware updates.

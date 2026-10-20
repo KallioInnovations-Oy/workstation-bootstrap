@@ -12,10 +12,15 @@
 # Developer by default: admin rights with their own password. --standard gives
 # an account without admin rights.
 #
-# Takes 20-40 minutes. It asks for input once, near the end: confirm that the
-# sealed escrow file has been stored. After that the disk unlocks with the TPM,
-# the install passphrase and install kiadmin password stop working, and the
-# only way back in for IT is the escrow file.
+# Takes 20-40 minutes. It asks for input twice, at the end: IT confirms that
+# the sealed escrow file has been stored, then the employee types their own
+# password. After the first, the disk unlocks with the TPM, the install
+# passphrase and install kiadmin password stop working, and the only way back
+# in for IT is the escrow file.
+#
+# The employee sets their password here rather than changing a temporary one
+# at first login: a forced change at the login screen leaves the GNOME login
+# keyring locked with the old password.
 set -Eeuo pipefail
 
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -284,15 +289,12 @@ ki_ok "Boot entries start without a password; editing them needs the GRUB passwo
 # =====================================================================
 STEP="user account"; ki_step "8/12 Employee account"
 # =====================================================================
-USER_PW=""
 if id "$USERNAME" >/dev/null 2>&1; then
-  ki_warn "$USERNAME already exists; password left unchanged"
+  ki_ok "$USERNAME already exists"
 else
+  # Created locked (no password). The employee sets it at the end of bootstrap.
   useradd -m -s /bin/bash "$USERNAME"
-  USER_PW=$(ki_random 'abcdefghjkmnpqrstuvwxyz23456789' 12)
-  printf '%s:%s\n' "$USERNAME" "$USER_PW" | chpasswd
-  chage -d 0 "$USERNAME"   # must choose a new password at first login
-  ki_ok "$USERNAME created. First-login password: $USER_PW"
+  ki_ok "$USERNAME created; the employee sets the password at the end"
 fi
 ki_apply_user_role "$USERNAME" "$ROLE"
 
@@ -380,6 +382,24 @@ fi
 ki_ok "Install disk passphrase removed"
 ki_ok "kiadmin password replaced (in escrow)"
 
+STEP="employee password"
+PW_STATE=$(passwd -S "$USERNAME" 2>/dev/null | awk '{print $2}')
+if [ "$PW_STATE" = "P" ]; then
+  ki_ok "$USERNAME already has a password; left unchanged"
+else
+  cat << EOF
+
+  Last step: hand the keyboard to the employee. They now type the password
+  they will log in with (and use for sudo). Nobody else needs to know it.
+
+EOF
+  # Straight to the terminal: nothing typed or prompted here reaches the log.
+  until passwd "$USERNAME" < /dev/tty > /dev/tty 2>&1; do
+    echo "  Password not set. Try again." > /dev/tty
+  done
+  ki_ok "$USERNAME password set by the employee"
+fi
+
 STEP="final check"
 /usr/local/sbin/ki-check --pre-reboot || true
 
@@ -393,7 +413,8 @@ cat << EOF
      disk passphrase prompt. (Firmware updates may add a reboot.)
   2. The employee logs in as: $USERNAME   ($ROLE)
 EOF
-[ -n "$USER_PW" ] && echo "     First-login password:   $USER_PW   (must be changed at login)"
+echo "     with the password they just set. Log in with the password, not the"
+echo "     fingerprint: only a password login unlocks the login keyring."
 [ "$ROLE" = developer ] && echo "     Admin rights: sudo with their own password, asked at most once an hour."
 cat << EOF
   3. The employee runs:  tailscale up   (no sudo) and signs in.
