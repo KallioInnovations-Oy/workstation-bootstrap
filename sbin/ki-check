@@ -111,7 +111,7 @@ ki_match 'Status: active' "$UFW" && ki_match 'deny \(incoming\)' "$UFW" && pass 
 [ "$(aa-enabled 2>/dev/null || true)" = "Yes" ] && pass "AppArmor enabled" || fail "AppArmor not enabled"
 
 RULES=$(auditctl -l 2>/dev/null || true)
-systemctl is-active -q auditd && ki_match 'key=identity' "$RULES" && pass "Audit logging active" || fail "Audit logging not active"
+systemctl is-active -q auditd && ki_match '(-k |key=)identity' "$RULES" && ki_match '(-k |key=)root_cmd' "$RULES" && pass "Audit logging active" || fail "Audit logging not active"
 
 systemctl is-enabled -q unattended-upgrades 2>/dev/null && pass "Automatic security updates enabled" || fail "Automatic security updates disabled"
 
