@@ -1,0 +1,474 @@
+From 1d5b4705b55f96d264ad9ce4e4445fc4d285b48a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 20 Oct 2026 09:34:16 +0300
+Subject: [PATCH] Developer role, Wi-Fi-first setup, Tailscale without sudo
+
+- bootstrap.sh: requires an internet connection before starting and helps
+  join Wi-Fi (nmtui); employee is a developer by default (sudo with own
+  password, prompted at most hourly), --standard for no admin rights;
+  Tailscale operator is waited for and verified, failing the step instead
+  of warning; saved Wi-Fi networks are shared with all users.
+- autoinstall.yaml: keeps the Wi-Fi joined in the installer for the first
+  boot; ki-setup waits for a network before fetching, asks the role.
+- New sbin/ki-user: set role and Tailscale operator on existing laptops.
+- ki-check: admin rights checked against the recorded role; FAIL if the
+  primary user is not the Tailscale operator.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JnBUPn1w4G9w1HxKye31uj
+---
+ README.md        |  22 +++++----
+ autoinstall.yaml |  34 ++++++++++++--
+ bootstrap.sh     |  47 +++++++++++--------
+ lib/common.sh    | 117 +++++++++++++++++++++++++++++++++++++++++++++++
+ sbin/ki-check    |  24 +++++++++-
+ sbin/ki-user     |  35 ++++++++++++++
+ 6 files changed, 247 insertions(+), 32 deletions(-)
+ create mode 100755 sbin/ki-user
+
+diff --git a/README.md b/README.md
+index 552453a..28647fa 100644
+--- a/README.md
++++ b/README.md
+@@ -30,37 +30,40 @@ contains no secrets: the two install values in `autoinstall.yaml` and
+ | Step | Hands-on | What to do |
+ | --- | --- | --- |
+ | 1. BIOS | 10 min | Supervisor password, Secure Boot on, Security Chip (TPM) on, Intel AMT off. **No power-on password.** See the procedure doc. |
+-| 2. Install | 2 min | Boot the Ubuntu 26.04.1 Desktop USB, choose **Automated installation**, give the URL below. Wipes the disk, no questions. |
+-| 3. Bootstrap | 5 min | Log in as `kiadmin` (password `ki-install-temporary`), open a terminal and run the two commands below. |
++| 2. Install | 2 min | Boot the USB stick with `autoinstall.yaml` in its root (or a plain stick: choose **Automated installation** and give the URL below). Wipes the disk, no questions. Works offline: without a network the stick's copy is used and the first boot has no Wi-Fi yet, which `ki-setup` handles. If the installer was on Wi-Fi, that network is kept. |
++| 3. Bootstrap | 5 min | Log in as `kiadmin` (password `ki-install-temporary`), open a terminal (Ctrl+Alt+T) and type `ki-setup`. It waits for a network (Wi-Fi is fine; press Enter to pick one), asks the employee's username and whether they are a developer, then fetches and runs the bootstrap. |
+ | 4. Escrow | 2 min | When asked, store the sealed file in `device-escrow`, type `SAVED`. |
+-| 5. Handover | 5 min | Reboot (no disk passphrase prompt). The employee logs in, sets a password, runs `tailscale up`, enrolls a fingerprint. |
++| 5. Handover | 5 min | Reboot (no disk passphrase prompt). The employee logs in, sets a password, runs `tailscale up` (no sudo needed), enrolls a fingerprint. |
+ 
+ Autoinstall URL:
+ ```
+ https://raw.githubusercontent.com/KallioInnovations-Oy/workstation-bootstrap/main/autoinstall.yaml
+ ```
+ 
+-Bootstrap (replace `villem` with the employee's username):
++Bootstrap by hand, if `ki-setup` is not there (replace `villem`; add `--standard` for an account without admin rights):
+ ```
+ git clone https://github.com/KallioInnovations-Oy/workstation-bootstrap.git
+ sudo bash workstation-bootstrap/bootstrap.sh villem
+ ```
+ 
++The bootstrap needs an internet connection the whole time. It checks before
++starting and helps join Wi-Fi if there is none.
++
+ The bootstrap stops at the first error, says which step failed, and can be run
+ again after fixing the cause. Its full log is `/var/log/ki-bootstrap.log`.
+ 
+ ## What bootstrap.sh does
+ 
+-1. Checks: Ubuntu 26.04, Secure Boot on, TPM present, one LUKS2 disk, escrow key set.
++1. Checks: internet connection, Ubuntu 26.04, Secure Boot on, TPM present, one LUKS2 disk, escrow key set.
+ 2. Hostname `ki-ws-<serial>`.
+ 3. Updates; installs the tools and the apps in `config/`.
+ 4. Hardening: auto security updates, firewall (deny incoming), audit rules, lockout after 5 failed logins, enforced 5-minute screen lock.
+-5. Wallpaper and internal hostnames.
++5. Wallpaper, internal hostnames; saved Wi-Fi networks made available to all users.
+ 6. TPM unlock bound to Secure Boot state (PCR 7); initramfs rebuilt and checked.
+ 7. Recovery key in LUKS slot 7, tested.
+ 8. Boot menu lock: entries boot without a password, editing them needs the GRUB password; recovery entries and the initramfs shell are disabled.
+-9. Employee account, no admin rights, password must be changed at first login.
+-10. Tailscale installed; the employee signs in so the device belongs to them.
++9. Employee account, password must be changed at first login. **Developer** (default): admin rights through sudo with their own password, asked at most once an hour. **Standard** (`--standard`): no admin rights.
++10. Tailscale installed and the employee made its operator, so `tailscale up` works without sudo; they sign in so the device belongs to them.
+ 11. Installs the maintenance tools below and their timers.
+ 12. Firmware updates.
+ 13. Seals recovery key + new random `kiadmin` password + GRUB password into one escrow file, waits for `SAVED`, then removes the install passphrase and install password.
+@@ -73,9 +76,10 @@ again after fixing the cause. Its full log is `/var/log/ki-bootstrap.log`.
+ | `sudo ki-check` | Run the check now. |
+ | `sudo ki-firmware-update` | BIOS/firmware updates without a recovery prompt afterwards. |
+ | `sudo ki-rotate "reason"` | After a recovery, after IT used the kiadmin password, when reissuing the laptop. |
++| `sudo ki-user <user> [developer\|standard]` | Change the primary user's role, or fix Tailscale needing sudo. Also for laptops installed before roles existed. |
+ | `ki-sync` (daily timer) | Pulls this repo and applies `config/apt-packages.txt`, `config/snaps.txt`, `config/hosts` and `branding/`. |
+ 
+-`sudo` needs the kiadmin password from the machine's escrow file.
++Developers run these with their own password. On a standard user's laptop, `sudo` needs the kiadmin password from the machine's escrow file.
+ 
+ ## Changing apps, hostnames or the wallpaper
+ 
+diff --git a/autoinstall.yaml b/autoinstall.yaml
+index bcf46be..cda0ef4 100644
+--- a/autoinstall.yaml
++++ b/autoinstall.yaml
+@@ -60,19 +60,45 @@ autoinstall:
+     - git
+     - curl
+ 
+-  # First-boot helper: after logging in as kiadmin, open a terminal (Ctrl+Alt+T)
+-  # and type: ki-setup
++  # 1. Keep the Wi-Fi joined in the installer, so the first boot is already
++  #    online. (Skipped if the installer copied it itself, or none was used.)
++  # 2. First-boot helper: after logging in as kiadmin, open a terminal
++  #    (Ctrl+Alt+T) and type: ki-setup
+   late-commands:
++    - |
++      for d in /etc/NetworkManager/system-connections /run/NetworkManager/system-connections; do
++        for f in "$d"/*.nmconnection; do
++          [ -f "$f" ] && grep -q '^type=wifi' "$f" || continue
++          dest="/target/etc/NetworkManager/system-connections/$(basename "$f")"
++          [ -e "$dest" ] && continue
++          mkdir -p /target/etc/NetworkManager/system-connections
++          sed '/^permissions=/d' "$f" > "$dest"
++          chown root:root "$dest"; chmod 0600 "$dest"
++        done
++      done
++      true
+     - |
+       cat > /target/usr/local/bin/ki-setup << 'EOF'
+       #!/bin/bash
+-      # KallioInnovations first-boot setup: fetches the bootstrap and runs it.
++      # KallioInnovations first-boot setup: waits for a network, fetches the
++      # bootstrap and runs it.
+       set -euo pipefail
+       REPO=https://github.com/KallioInnovations-Oy/workstation-bootstrap.git
+       DIR="$HOME/workstation-bootstrap"
++      online() { curl -fsS --max-time 8 -o /dev/null https://github.com 2>/dev/null; }
++      if ! online; then
++        echo "No internet connection yet. Wi-Fi is fine; it does not need a cable."
++        until online; do
++          echo "Connect from the network menu at the top right, or press Enter here to pick a Wi-Fi network."
++          if read -r -t 20 _; then nmtui connect || true; fi
++        done
++      fi
++      echo "Online."
+       read -r -p "Employee username (first name + last initial, e.g. villem): " U
++      read -r -p "Developer with admin rights (sudo)? [Y/n]: " A
++      case "$A" in [nN]*) ROLE=--standard ;; *) ROLE= ;; esac
+       if [ -d "$DIR/.git" ]; then git -C "$DIR" pull -q --ff-only; else git clone -q "$REPO" "$DIR"; fi
+-      exec sudo bash "$DIR/bootstrap.sh" "$U"
++      exec sudo bash "$DIR/bootstrap.sh" "$U" $ROLE
+       EOF
+       chmod 0755 /target/usr/local/bin/ki-setup
+ 
+diff --git a/bootstrap.sh b/bootstrap.sh
+index 948a61b..556f5c4 100644
+--- a/bootstrap.sh
++++ b/bootstrap.sh
+@@ -2,10 +2,15 @@
+ # KallioInnovations workstation bootstrap - run once, on the first boot after
+ # the automated install, logged in as kiadmin:
+ #
++#   ki-setup        (installed by autoinstall.yaml: waits for Wi-Fi, fetches
++#                    this repo and runs this script)
++# or by hand:
+ #   git clone https://github.com/KallioInnovations-Oy/workstation-bootstrap.git
+-#   sudo bash workstation-bootstrap/bootstrap.sh <username>
++#   sudo bash workstation-bootstrap/bootstrap.sh <username> [--standard]
+ #
+ # <username> is the employee's account (first name + last initial, e.g. villem).
++# Developer by default: admin rights with their own password. --standard gives
++# an account without admin rights.
+ #
+ # Takes 20-40 minutes. It asks for input once, near the end: confirm that the
+ # sealed escrow file has been stored. After that the disk unlocks with the TPM,
+@@ -33,15 +38,25 @@ trap cleanup EXIT
+ trap 'printf "\n\033[1;31mBOOTSTRAP FAILED\033[0m during: %s (line %s)\nNothing after this step ran. Fix the cause and run the script again.\n" "$STEP" "$LINENO" >&2' ERR
+ 
+ USERNAME=${1:-}
++ROLE=developer
++case "${2:-}" in
++  "") ;;
++  --standard) ROLE=standard ;;
++  *) ki_die "Unknown option: $2   (usage: sudo bash bootstrap.sh <username> [--standard])" ;;
++esac
+ LOG=/var/log/ki-bootstrap.log
+ 
+ # =====================================================================
+ ki_step "0/12 Preflight checks"
+ # =====================================================================
+ ki_require_root
+-[ -n "$USERNAME" ] || ki_die "Usage: sudo bash bootstrap.sh <username>   (e.g. villem)"
+-ki_match '^[a-z][a-z0-9]{1,30}$' "$USERNAME" || ki_die "Username must be lowercase letters and digits, e.g. villem."
++[ -n "$USERNAME" ] || ki_die "Usage: sudo bash bootstrap.sh <username> [--standard]   (e.g. villem)"
++ki_valid_username "$USERNAME" || ki_die "Username must be lowercase letters and digits, e.g. villem."
+ [ "$USERNAME" != "$KI_ADMIN_USER" ] || ki_die "The employee account cannot be $KI_ADMIN_USER."
++ki_ok "Employee $USERNAME ($ROLE)"
++
++# Everything after this downloads: packages, Tailscale, firmware.
++ki_require_network
+ 
+ # shellcheck source=/dev/null
+ . /etc/os-release
+@@ -201,12 +216,13 @@ AA=$(aa-enabled 2>&1 || true)
+ [ "$AA" = "Yes" ] && ki_ok "AppArmor enabled" || ki_warn "AppArmor reports: $AA"
+ 
+ # =====================================================================
+-STEP="branding and hosts"; ki_step "4/12 Wallpaper and internal hostnames"
++STEP="branding, hosts and Wi-Fi"; ki_step "4/12 Wallpaper, internal hostnames, shared Wi-Fi"
+ # =====================================================================
+ ki_apply_branding "$REPO_DIR/branding"
+ ki_ok "KallioInnovations wallpaper"
+ ki_apply_hosts "$REPO_DIR/config/hosts"
+ ki_ok "Staging hostnames in /etc/hosts"
++ki_share_wifi
+ 
+ # =====================================================================
+ STEP="TPM unlock"; ki_step "5/12 Disk unlock with the TPM"
+@@ -276,14 +292,9 @@ else
+   USER_PW=$(ki_random 'abcdefghjkmnpqrstuvwxyz23456789' 12)
+   printf '%s:%s\n' "$USERNAME" "$USER_PW" | chpasswd
+   chage -d 0 "$USERNAME"   # must choose a new password at first login
+-  ki_ok "$USERNAME created (no admin rights). First-login password: $USER_PW"
++  ki_ok "$USERNAME created. First-login password: $USER_PW"
+ fi
+-for grp in sudo adm; do
+-  if ki_match "^${grp}\$" "$(id -nG "$USERNAME" | tr ' ' '\n')"; then
+-    gpasswd -d "$USERNAME" "$grp" >/dev/null
+-    ki_warn "Removed $USERNAME from $grp"
+-  fi
+-done
++ki_apply_user_role "$USERNAME" "$ROLE"
+ 
+ # =====================================================================
+ STEP="Tailscale"; ki_step "9/12 Tailscale"
+@@ -293,11 +304,10 @@ if ! command -v tailscale >/dev/null; then
+   quiet sh "$SECRETS/tailscale-install.sh"
+ fi
+ systemctl enable --now tailscaled >/dev/null 2>&1
+-if tailscale set --operator="$USERNAME" --hostname="$HOST" 2>/dev/null; then
+-  ki_ok "Installed; $USERNAME signs in with: tailscale up"
+-else
+-  ki_warn "Could not pre-set the Tailscale operator. After handover IT runs: sudo tailscale up --operator=$USERNAME"
+-fi
++ki_tailscale_operator "$USERNAME" \
++  || ki_die "Could not let $USERNAME run tailscale without sudo (tailscaled not answering?). Run the bootstrap again."
++tailscale set --hostname="$HOST" >/dev/null 2>&1 || ki_warn "Could not set the Tailscale hostname; it will use $HOST anyway."
++ki_ok "Installed; $USERNAME signs in with: tailscale up   (no sudo)"
+ 
+ # =====================================================================
+ STEP="KI tools"; ki_step "10/12 KI maintenance tools"
+@@ -381,11 +391,12 @@ cat << EOF
+   Next:
+   1. Reboot. It must go straight to the login screen, with no
+      disk passphrase prompt. (Firmware updates may add a reboot.)
+-  2. The employee logs in as: $USERNAME
++  2. The employee logs in as: $USERNAME   ($ROLE)
+ EOF
+ [ -n "$USER_PW" ] && echo "     First-login password:   $USER_PW   (must be changed at login)"
++[ "$ROLE" = developer ] && echo "     Admin rights: sudo with their own password, asked at most once an hour."
+ cat << EOF
+-  3. The employee runs:  tailscale up   and signs in.
++  3. The employee runs:  tailscale up   (no sudo) and signs in.
+   4. Settings > System > Users > Fingerprint Login.
+   5. Check the result any time:  cat /var/log/ki-check.txt
+ ================================================================
+diff --git a/lib/common.sh b/lib/common.sh
+index fdccc9f..9ebce37 100644
+--- a/lib/common.sh
++++ b/lib/common.sh
+@@ -19,6 +19,123 @@ ki_match() { grep -Eq -- "$1" <<<"$2"; }
+ 
+ ki_require_root() { [ "$(id -u)" -eq 0 ] || ki_die "Run this as root (sudo)."; }
+ 
++# ---------- network ----------
++# Exit 0 if GitHub answers over HTTPS (DNS, routing and TLS all working).
++ki_online() { curl -fsS --max-time 8 -o /dev/null https://github.com 2>/dev/null; }
++
++# Waits for an internet connection, helping the person at the keyboard join
++# Wi-Fi. Gives up after about 15 minutes. Interactive scripts only.
++ki_require_network() {
++  local tries=0
++  ki_online && { ki_ok "Internet connection"; return 0; }
++  ki_warn "No internet connection. Wi-Fi is fine; it does not need a cable."
++  until ki_online; do
++    tries=$((tries + 1))
++    [ "$tries" -le 45 ] || ki_die "Still no internet connection after 15 minutes."
++    if [ -r /dev/tty ] && command -v nmtui >/dev/null; then
++      printf '   Connect from the network menu at the top right of the screen, or press Enter here to pick a Wi-Fi network.\n'
++      if read -r -t 20 _ < /dev/tty; then
++        nmtui connect < /dev/tty > /dev/tty 2>&1 || true
++      fi
++    else
++      sleep 20
++    fi
++  done
++  ki_ok "Internet connection"
++}
++
++# Makes every saved Wi-Fi connection available to all users, so the network
++# kiadmin joined during setup also works at the employee's login screen.
++ki_share_wifi() {
++  local uuid type name flags
++  command -v nmcli >/dev/null || return 0
++  while IFS=: read -r uuid type; do
++    [ "$type" = "802-11-wireless" ] || continue
++    name=$(nmcli -g connection.id connection show "$uuid" 2>/dev/null || true)
++    nmcli connection modify "$uuid" connection.permissions "" >/dev/null 2>&1 \
++      || { ki_warn "Could not share Wi-Fi network: $name"; continue; }
++    flags=$(nmcli -g 802-11-wireless-security.psk-flags connection show "$uuid" 2>/dev/null || true)
++    case "$flags" in
++      ""|0*) ki_ok "Wi-Fi network shared with all users: $name" ;;
++      *) ki_warn "Wi-Fi $name: password saved for one user only; the employee types it once." ;;
++    esac
++  done < <(nmcli -g UUID,TYPE connection show 2>/dev/null || true)
++}
++
++# ---------- primary user ----------
++# Roles: developer = admin rights (sudo), asked for their password at most once
++# an hour; standard = no admin rights. Recorded in $KI_STATE_DIR/primary-user,
++# which ki-check reads.
++ki_valid_username() { ki_match '^[a-z][a-z0-9]{1,30}$' "$1"; }
++
++# ki_apply_user_role <user> <developer|standard>
++ki_apply_user_role() {
++  local user=$1 role=$2 grp drop tmp line ok=0
++  id "$user" >/dev/null 2>&1 || ki_die "No account named $user."
++  [ "$user" != "$KI_ADMIN_USER" ] || ki_die "The employee account cannot be $KI_ADMIN_USER."
++  drop="/etc/sudoers.d/60-ki-$user"
++  case "$role" in
++    developer)
++      usermod -aG sudo "$user"
++      # Ubuntu ships sudo-rs, which may reject options classic sudo accepts:
++      # use the first line that validates.
++      tmp=$(mktemp)
++      for line in \
++        "Defaults:$user timestamp_timeout=60, timestamp_type=global" \
++        "Defaults:$user timestamp_timeout=60"; do
++        printf '# KallioInnovations: developer %s, sudo password at most once an hour\n%s\n' "$user" "$line" > "$tmp"
++        if visudo -cqf "$tmp" >/dev/null 2>&1; then ok=1; break; fi
++      done
++      if [ "$ok" -eq 1 ]; then
++        install -m 0440 -o root -g root "$tmp" "$drop"
++      else
++        rm -f "$drop"
++        ki_warn "sudo password caching not changed (no option validated); sudo still works"
++      fi
++      rm -f "$tmp"
++      ki_ok "$user is a developer: admin rights via sudo with their own password"
++      ;;
++    standard)
++      for grp in sudo adm; do
++        if ki_match "^${grp}\$" "$(id -nG "$user" | tr ' ' '\n')"; then
++          gpasswd -d "$user" "$grp" >/dev/null
++          ki_warn "Removed $user from $grp"
++        fi
++      done
++      rm -f "$drop"
++      ki_ok "$user is a standard user: no admin rights"
++      ;;
++    *) ki_die "Role must be developer or standard, not: $role" ;;
++  esac
++  install -d -m 0755 "$KI_STATE_DIR"
++  printf 'user=%s\nrole=%s\n' "$user" "$role" > "$KI_STATE_DIR/primary-user"
++  chmod 0644 "$KI_STATE_DIR/primary-user"
++}
++
++# ki_primary_user_field <user|role> - prints the recorded value, or nothing.
++ki_primary_user_field() {
++  awk -F= -v k="$1" '$1 == k { print $2; exit }' "$KI_STATE_DIR/primary-user" 2>/dev/null || true
++}
++
++# ---------- Tailscale ----------
++# Prints the user allowed to run "tailscale up/down" without sudo, or nothing.
++ki_tailscale_operator_now() {
++  local prefs
++  prefs=$(tailscale debug prefs 2>/dev/null) || return 0
++  python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("OperatorUser") or "")' <<<"$prefs" 2>/dev/null || true
++}
++
++# ki_tailscale_operator <user> - waits for tailscaled (it is slow to start right
++# after install), sets the operator and verifies it. Exit 1 if it did not stick.
++ki_tailscale_operator() {
++  local user=$1
++  for _ in $(seq 1 30); do
++    [ -S /var/run/tailscale/tailscaled.sock ] && tailscale set --operator="$user" >/dev/null 2>&1 && break
++    sleep 1
++  done
++  [ "$(ki_tailscale_operator_now)" = "$user" ]
++}
++
+ # ---------- machine identity ----------
+ ki_serial() {
+   local s
+diff --git a/sbin/ki-check b/sbin/ki-check
+index 2ca13bb..eec05a3 100644
+--- a/sbin/ki-check
++++ b/sbin/ki-check
+@@ -81,8 +81,25 @@ fi
+ SHADOW=$(getent shadow "$KI_ADMIN_USER" | cut -d: -f2)
+ [ "$SHADOW" != "$KI_INSTALL_ADMIN_HASH" ] && pass "$KI_ADMIN_USER install password replaced" || fail "$KI_ADMIN_USER still has the install password"
+ 
++PRIMARY=$(ki_primary_user_field user)
++ROLE=$(ki_primary_user_field role)
++ALLOWED="$KI_ADMIN_USER"
++[ -n "$PRIMARY" ] && [ "$ROLE" = developer ] && ALLOWED="$KI_ADMIN_USER"$'\n'"$PRIMARY"
++ALLOWED=$(sort -u <<<"$ALLOWED" | tr '\n' ' ')
+ ADMINS=$(getent group sudo admin | cut -d: -f4 | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+-[ "$ADMINS" = "$KI_ADMIN_USER " ] && pass "Only $KI_ADMIN_USER has admin rights" || fail "Admin rights held by: ${ADMINS:-nobody}"
++if [ "$ADMINS" = "$ALLOWED" ]; then
++  pass "Admin rights: ${ADMINS% }"
++else
++  fail "Admin rights held by: ${ADMINS:-nobody }(expected: ${ALLOWED% })"
++fi
++
++if [ -z "$PRIMARY" ]; then
++  warn "No primary user recorded; run: sudo ki-user <username> [developer|standard]"
++elif ! id "$PRIMARY" >/dev/null 2>&1; then
++  fail "Primary user $PRIMARY does not exist"
++else
++  pass "Primary user $PRIMARY ($ROLE)"
++fi
+ 
+ ESCROWS=$(find "$KI_ESCROW_DIR" -name '*.age' 2>/dev/null | wc -l)
+ [ "$ESCROWS" -ge 1 ] && pass "Sealed escrow file present ($ESCROWS)" || fail "No sealed escrow file in $KI_ESCROW_DIR"
+@@ -108,6 +125,11 @@ ki_match 'idle-delay' "$LOCKS" && ki_match 'lock-enabled' "$LOCKS" && pass "Scre
+ if command -v tailscale >/dev/null; then
+   TS=$(tailscale status --json 2>/dev/null | python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("BackendState",""))' 2>/dev/null || true)
+   [ "$TS" = "Running" ] && pass "Tailscale connected" || warn "Tailscale not signed in (${TS:-unknown}); the user runs: tailscale up"
++  if [ -n "$PRIMARY" ]; then
++    OP=$(ki_tailscale_operator_now)
++    [ "$OP" = "$PRIMARY" ] && pass "$PRIMARY runs Tailscale without sudo" \
++      || fail "Tailscale operator is '${OP:-nobody}', not $PRIMARY; fix: sudo ki-user $PRIMARY $ROLE"
++  fi
+ else
+   fail "Tailscale not installed"
+ fi
+diff --git a/sbin/ki-user b/sbin/ki-user
+new file mode 100755
+index 0000000..01351c4
+--- /dev/null
++++ b/sbin/ki-user
+@@ -0,0 +1,35 @@
++#!/bin/bash
++# KallioInnovations: set this laptop's primary user and their role, and let
++# them run Tailscale without sudo. bootstrap.sh does the same at install time;
++# use this on laptops installed earlier, or when the role changes.
++#
++#   sudo ki-user <username> [developer|standard]
++#
++#   developer  (default) admin rights: sudo with their own password, asked at
++#              most once an hour
++#   standard   no admin rights
++set -Eeuo pipefail
++source /usr/local/lib/ki/ki.conf
++KI_LIB_SRC=/usr/local/lib/ki; KI_ESCROW_PUB=/usr/local/lib/ki/escrow.pub
++source /usr/local/lib/ki/common.sh
++
++ki_require_root
++USER_NAME=${1:-}
++ROLE=${2:-developer}
++[ -n "$USER_NAME" ] || ki_die "Usage: sudo ki-user <username> [developer|standard]"
++ki_valid_username "$USER_NAME" || ki_die "Username must be lowercase letters and digits, e.g. villem."
++
++ki_step "Primary user"
++ki_apply_user_role "$USER_NAME" "$ROLE"
++
++ki_step "Tailscale"
++if command -v tailscale >/dev/null; then
++  ki_tailscale_operator "$USER_NAME" \
++    && ki_ok "$USER_NAME runs tailscale up/down without sudo" \
++    || ki_warn "Could not set the Tailscale operator; is tailscaled running?"
++else
++  ki_warn "Tailscale is not installed"
++fi
++
++ki_ok "Group changes apply at $USER_NAME's next login"
++/usr/local/sbin/ki-check || true
+-- 
+2.43.0
+
