@@ -69,11 +69,22 @@ fi
 ki_match 'recovery mode|gnulinux-[^ ]*-recovery-' "$CFG" && fail "Recovery boot entries present (root shell)" || pass "No recovery boot entries"
 
 if [ "$MODE" != "--pre-reboot" ]; then
-  JOURNAL=$(journalctl -b -o cat -t systemd-cryptsetup 2>/dev/null || true)
-  if ki_match '[Tt][Pp][Mm]2? token unlocks volume|unlocked .*TPM2' "$JOURNAL"; then
-    pass "Disk was unlocked by the TPM at this boot"
+  # systemd-cryptsetup logs nothing on a successful TPM unlock, so time it:
+  # crypttab has no key file, so the disk opens by TPM or by a typed key, and
+  # nobody types a recovery key in under 10 seconds.
+  CRYPT_LOG=$(journalctl -b -o short-monotonic --no-hostname _PID=1 2>/dev/null \
+    | grep -E ': (Starting|Finished) systemd-cryptsetup@' || true)
+  UNLOCK_SECS=$(awk '
+    { t = $0; sub(/^\[ */, "", t); sub(/\].*/, "", t) }
+    /: Starting systemd-cryptsetup@/ && s == "" { s = t }
+    /: Finished systemd-cryptsetup@/ && f == "" { f = t }
+    END { if (s != "" && f != "") printf "%.1f", f - s }' <<<"$CRYPT_LOG")
+  if [ -z "$UNLOCK_SECS" ]; then
+    warn "No disk unlock found in this boot's journal"
+  elif awk -v t="$UNLOCK_SECS" 'BEGIN { exit !(t < 10) }'; then
+    pass "Disk unlocked by the TPM at this boot (${UNLOCK_SECS} s, no typed key)"
   else
-    warn "Could not confirm TPM unlock at this boot (was a passphrase asked?)"
+    warn "Disk unlock took ${UNLOCK_SECS} s at this boot: was the recovery key typed?"
   fi
 fi
 
@@ -111,7 +122,7 @@ ki_match 'Status: active' "$UFW" && ki_match 'deny \(incoming\)' "$UFW" && pass 
 [ "$(aa-enabled 2>/dev/null || true)" = "Yes" ] && pass "AppArmor enabled" || fail "AppArmor not enabled"
 
 RULES=$(auditctl -l 2>/dev/null || true)
-systemctl is-active -q auditd && ki_match 'key=identity' "$RULES" && pass "Audit logging active" || fail "Audit logging not active"
+systemctl is-active -q auditd && ki_match '(-k |key=)identity' "$RULES" && ki_match '(-k |key=)root_cmd' "$RULES" && pass "Audit logging active" || fail "Audit logging not active"
 
 systemctl is-enabled -q unattended-upgrades 2>/dev/null && pass "Automatic security updates enabled" || fail "Automatic security updates disabled"
 
