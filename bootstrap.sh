@@ -100,7 +100,7 @@ ki_ok "initramfs built by dracut with systemd"
 AC=$(cat /sys/class/power_supply/AC*/online 2>/dev/null || echo 0)
 [ "$AC" = "1" ] || ki_warn "Not on mains power. Plug in the charger; firmware updates need it."
 
-touch "$LOG"; chmod 0600 "$LOG"   # holds the first-login password
+touch "$LOG"; chmod 0600 "$LOG"   # root-only: device details and the sealed escrow file
 exec > >(tee -a "$LOG") 2>&1
 quiet() { "$@" >> "$LOG" 2>&1; }   # detail goes to the log only
 echo "Bootstrap started $(date -Iseconds) for user $USERNAME" >> "$LOG"
