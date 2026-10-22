@@ -6,7 +6,7 @@
 #   sudo ki-user <username> [developer|standard]
 #
 #   developer  (default) admin rights: sudo with their own password, asked at
-#              most once an hour
+#              most once an hour per terminal
 #   standard   no admin rights
 set -Eeuo pipefail
 source /usr/local/lib/ki/ki.conf

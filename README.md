@@ -62,7 +62,7 @@ again after fixing the cause. Its full log is `/var/log/ki-bootstrap.log`.
 6. TPM unlock bound to Secure Boot state (PCR 7); initramfs rebuilt and checked.
 7. Recovery key in LUKS slot 7, tested.
 8. Boot menu lock: entries boot without a password, editing them needs the GRUB password; recovery entries and the initramfs shell are disabled.
-9. Employee account, created without a password; the employee types their own at the end of the bootstrap. (A temporary password changed at first login would leave the GNOME login keyring locked with the old one.) **Developer** (default): admin rights through sudo with their own password, asked at most once an hour. **Standard** (`--standard`): no admin rights.
+9. Employee account, created without a password; the employee types their own at the end of the bootstrap. (A temporary password changed at first login would leave the GNOME login keyring locked with the old one.) **Developer** (default): admin rights through sudo with their own password, asked at most once an hour per terminal. **Standard** (`--standard`): no admin rights.
 10. Tailscale installed and the employee made its operator, so `tailscale up` works without sudo; they sign in so the device belongs to them.
 11. Installs the maintenance tools below and their timers.
 12. Firmware updates.

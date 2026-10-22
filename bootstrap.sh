@@ -415,7 +415,7 @@ cat << EOF
 EOF
 echo "     with the password they just set. Log in with the password, not the"
 echo "     fingerprint: only a password login unlocks the login keyring."
-[ "$ROLE" = developer ] && echo "     Admin rights: sudo with their own password, asked at most once an hour."
+[ "$ROLE" = developer ] && echo "     Admin rights: sudo with their own password, asked at most once an hour per terminal."
 cat << EOF
   3. The employee runs:  tailscale up   (no sudo) and signs in.
   4. Settings > System > Users > Fingerprint Login.

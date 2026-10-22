@@ -64,33 +64,29 @@ ki_share_wifi() {
 
 # ---------- primary user ----------
 # Roles: developer = admin rights (sudo), asked for their password at most once
-# an hour; standard = no admin rights. Recorded in $KI_STATE_DIR/primary-user,
+# an hour per terminal; standard = no admin rights. Recorded in $KI_STATE_DIR/primary-user,
 # which ki-check reads.
 ki_valid_username() { ki_match '^[a-z][a-z0-9]{1,30}$' "$1"; }
 
 # ki_apply_user_role <user> <developer|standard>
 ki_apply_user_role() {
-  local user=$1 role=$2 grp drop tmp line ok=0
+  local user=$1 role=$2 grp drop tmp
   id "$user" >/dev/null 2>&1 || ki_die "No account named $user."
   [ "$user" != "$KI_ADMIN_USER" ] || ki_die "The employee account cannot be $KI_ADMIN_USER."
   drop="/etc/sudoers.d/60-ki-$user"
   case "$role" in
     developer)
       usermod -aG sudo "$user"
-      # Ubuntu ships sudo-rs, which may reject options classic sudo accepts:
-      # use the first line that validates.
+      # Ubuntu ships sudo-rs. Only timestamp_timeout is set: sudo-rs's visudo
+      # accepts timestamp_type, but sudo-rs itself rejects it at run time and
+      # warns on every sudo. The cache is therefore per terminal.
       tmp=$(mktemp)
-      for line in \
-        "Defaults:$user timestamp_timeout=60, timestamp_type=global" \
-        "Defaults:$user timestamp_timeout=60"; do
-        printf '# KallioInnovations: developer %s, sudo password at most once an hour\n%s\n' "$user" "$line" > "$tmp"
-        if visudo -cqf "$tmp" >/dev/null 2>&1; then ok=1; break; fi
-      done
-      if [ "$ok" -eq 1 ]; then
+      printf '# KallioInnovations: developer %s, sudo password at most once an hour per terminal\nDefaults:%s timestamp_timeout=60\n' "$user" "$user" > "$tmp"
+      if visudo -cqf "$tmp" >/dev/null 2>&1; then
         install -m 0440 -o root -g root "$tmp" "$drop"
       else
         rm -f "$drop"
-        ki_warn "sudo password caching not changed (no option validated); sudo still works"
+        ki_warn "sudo password caching not changed (option rejected); sudo still works"
       fi
       rm -f "$tmp"
       ki_ok "$user is a developer: admin rights via sudo with their own password"
